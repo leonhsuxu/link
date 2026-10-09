@@ -386,12 +386,26 @@ jobs:
           chmod +x xcspeedtest && ./xcspeedtest --help
       - name: 下载 clash-speedtest 核心
         run: |
+          set -e
           mkdir -p clash_core
           URL="https://github.com/faceair/clash-speedtest/releases/download/${{ env.CLASH_SPEEDTEST_VERSION }}/clash-speedtest_Linux_x86_64.tar.gz"
+          echo "下载：$URL"
           wget -q -O clash-speedtest.tar.gz "$URL"
           tar -xzf clash-speedtest.tar.gz -C clash_core
           rm -f clash-speedtest.tar.gz
-          mv clash_core/clash-speedtest clash_core/clash && chmod +x clash_core/clash
+          # 兼容 tarball 内二进制命名（clash-speedtest / clash / 子目录），统一重命名为 clash
+          if [ ! -f clash_core/clash ]; then
+            BIN=$(find clash_core -type f -name 'clash-speedtest*' 2>/dev/null | head -n1)
+            if [ -z "$BIN" ]; then
+              echo "❌ 未在 clash_core/ 中找到 clash-speedtest 二进制，解包内容如下："
+              ls -laR clash_core/
+              exit 1
+            fi
+            mv "$BIN" clash_core/clash
+          fi
+          chmod +x clash_core/clash
+          echo "✅ clash-speedtest 核心就绪："
+          ls -la clash_core/
       - name: 打包工具链
         run: |
           tar -czf toolchain.tar.gz pylibs mihomo wgcf xcspeedtest clash_core
@@ -486,11 +500,45 @@ jobs:
       # === 步骤5：把工具链二进制软链进 _priv（脚本以 _priv 为根，路径语义与原版一致） ===
       - name: 软链工具链到 _priv
         run: |
-          ln -sf "$GITHUB_WORKSPACE/mihomo"      _priv/mihomo
-          ln -sf "$GITHUB_WORKSPACE/wgcf"        _priv/wgcf
-          ln -sf "$GITHUB_WORKSPACE/xcspeedtest" _priv/xcspeedtest
-          ln -sf "$GITHUB_WORKSPACE/clash_core"  _priv/clash_core
-          ls -la _priv/mihomo _priv/xcspeedtest _priv/clash_core/clash
+          # 先校验工具链是否已在 $GITHUB_WORKSPACE 就绪（setup 构建 + 本 job 已解包）
+          # 若 clash 二进制真的没构建出来，这里就明确报错并列出目录，便于定位，而不是在后面 ls 时才挂掉
+          MISSING=0
+          for f in mihomo wgcf xcspeedtest clash_core/clash; do
+            if [ ! -e "$GITHUB_WORKSPACE/$f" ]; then
+              echo "❌ 工具链缺失：$GITHUB_WORKSPACE/$f"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            echo "--- $GITHUB_WORKSPACE 目录内容 ---"
+            ls -la "$GITHUB_WORKSPACE" || true
+            echo "（请检查 setup job 是否成功构建 clash-speedtest 核心，或 toolchain artifact 是否完整解包）"
+            exit 1
+          fi
+
+          # 软链文件型二进制（mihomo/wgcf/xcspeedtest）：直接整体覆盖为软链
+          for b in mihomo wgcf xcspeedtest; do
+            rm -f "_priv/$b"
+            ln -s "$GITHUB_WORKSPACE/$b" "_priv/$b"
+            echo "🔗 _priv/$b -> $(readlink -f "_priv/$b")"
+          done
+
+          # clash_core 可能是私库克隆带出的残留目录：
+          # 若直接用 ln -sf <dir> _priv/clash_core，ln 会把软链误建到目录「内部」(_priv/clash_core/clash_core)，
+          # 导致 _priv/clash_core/clash 解析不到真实二进制。这里分两种情形处理：
+          if [ -e "_priv/clash_core" ] && [ ! -L "_priv/clash_core" ]; then
+            # 情形 A：_priv/clash_core 是残留真实目录 → 仅把真实二进制软链进去，保留其它内容
+            ln -sf "$GITHUB_WORKSPACE/clash_core/clash" "_priv/clash_core/clash"
+            echo "🔗 _priv/clash_core/clash -> $(readlink -f "_priv/clash_core/clash")"
+          else
+            # 情形 B：不存在或已是软链 → 整体软链到工作区的 clash_core 目录
+            rm -f "_priv/clash_core"
+            ln -s "$GITHUB_WORKSPACE/clash_core" "_priv/clash_core"
+            echo "🔗 _priv/clash_core -> $(readlink -f "_priv/clash_core")"
+          fi
+
+          echo "--- 校验关键软链（仅展示，不因此失败）---"
+          ls -la _priv/mihomo _priv/xcspeedtest _priv/clash_core/clash 2>&1 || true
 
       # === 步骤6：运行测速脚本（仅本分片，FROM_JSON 读取已抓取节点） ===
       - name: 智能网络配置 + 运行测速脚本
