@@ -1,5 +1,5 @@
 # ============================================================================
-# 版本：V02.r1（公库执行版 —— 迁移自私库 V01.r1 分片版）
+# 版本：V02.r1（公库运行私库版）
 #
 # 架构：
 #   - 本 yml 唯一存放于公库 leonhsuxu/link/.github/workflows/
@@ -21,7 +21,6 @@
 #    nodes-cache artifact 在私库 .secrets.env 设置 ART_PASS 后自动加密上传。
 # ============================================================================
 
-# 版本：V01.r1（手动运行分片=20，自动运行分片=20）
 name: 📚 [Gist]Publiclink.All.Test_多版本
 # ==================== 触发条件配置 ====================
 # TCP、Clash、XCspeedtest 三合一测速版
@@ -672,6 +671,11 @@ jobs:
     concurrency:
       group: db-cache-commit
       cancel-in-progress: false
+    # 🔐 仅授予本 job 所需的最小 token 权限：
+    #   actions: write → 删除本次运行 artifact（防公网下载，见末步）
+    #   （回推私库走 PRIV_PAT，Gist 走 .secrets.env 的 GIST_TOKEN，均不依赖 GITHUB_TOKEN）
+    permissions:
+      actions: write
     steps:
       # === 步骤1：完整克隆私库（用于合并与回推） ===
       - name: 完整克隆私库 VPSscript
@@ -854,3 +858,28 @@ jobs:
             exit 1
           fi
           rm -f response.json "$PAYLOAD_FILE"
+
+      # === 步骤9：清理本次运行全部 artifact（最后一个消费者 merge 跑完后删除，防公网下载）===
+      #   覆盖节点缓存(nodes-cache)、工具链(toolchain)、各分片(shard-*) 全部 artifact。
+      #   nodes_cache 即便已用 ART_PASS AES-256 加密，shard-* 仍为明文，故必须删。
+      - name: 🧹 清理本次运行全部 artifact（防公开下载）
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          RUN_ID="${{ github.run_id }}"
+          echo "🧹 清理本次运行 (run_id=${RUN_ID}) 的全部 artifact..."
+          IDS=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/artifacts" --paginate --jq '.artifacts[].id' 2>/dev/null || true)
+          if [ -z "$IDS" ]; then
+            echo "✅ 没有需要清理的 artifact。"
+          else
+            for id in $IDS; do
+              if gh api -X DELETE "repos/${REPO}/actions/artifacts/${id}" >/dev/null 2>&1; then
+                echo "  🗑️ 已删除 artifact id=${id}"
+              else
+                echo "  ⚠️ 删除 artifact id=${id} 失败（可能已过期）"
+              fi
+            done
+            echo "✅ 全部 artifact 清理完成。"
+          fi
