@@ -823,7 +823,8 @@ jobs:
           fi
 
           while IFS= read -r filepath; do
-            raw_filename=${filepath#_priv/flclashyaml/output_yaml/}
+            # 固定链接方案发布名加前缀，避免与 TG-Link(裸名 TCP/clash/speedtest.yaml) 及方案一(裸名 filtered_Min.yaml) 在同一 Gist 撞名互覆
+            raw_filename="urltxt_${filepath#_priv/flclashyaml/output_yaml/}"
             filename=$(echo "$raw_filename" | sed 's/\//_/g')
             filesize=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null || echo 0)
             echo "正在处理: $filename ($filesize bytes)"
@@ -864,7 +865,8 @@ jobs:
             echo "✅ 指定文件同步成功！"
             echo "🔗 订阅链接 (Raw URL)：与原先完全一致"
             while IFS= read -r filepath; do
-              raw_filename=${filepath#_priv/flclashyaml/output_yaml/}
+              # 固定链接方案发布名加前缀，避免与 TG-Link/方案一 在同一 Gist 撞名互覆
+              raw_filename="urltxt_${filepath#_priv/flclashyaml/output_yaml/}"
               filename=$(echo "$raw_filename" | sed 's/\//_/g')
               url_filename=$(echo "$filename" | sed 's/ /%20/g')
               echo "📄 $raw_filename -> https://gist.githubusercontent.com/$USER_NAME/$GIST_ID/raw/$url_filename"
