@@ -560,7 +560,7 @@ jobs:
           SHARD_TOTAL: ${{ inputs.shard_total || env.SHARD_TOTAL }}
           SHARD_INDEX: ${{ matrix.shard }}
           # —— 方案 C：外层并发上限（公开库 4vCPU 建议 16–24）——
-          MAX_TEST_WORKERS: "20"
+          MAX_TEST_WORKERS: "48"
         run: |
           echo "=== 开始执行测速脚本（分片 ${{ matrix.shard }}/${SHARD_TOTAL}，FROM_JSON 载入节点）==="
           set -a; . TelegramNode/.secrets.env; set +a
