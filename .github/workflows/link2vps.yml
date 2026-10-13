@@ -1,5 +1,5 @@
 # ============================================================================
-# 版本：V02.r1（公库运行私库版）
+# 版本：V02.r1-缓存（公库运行私库版；setup 工具链下载加缓存，有缓存则不重下）
 #
 # 架构：
 #   - 本 yml 唯一存放于公库 leonhsuxu/link/.github/workflows/
@@ -94,7 +94,7 @@ concurrency:
 # ==================== 环境变量配置 ====================
 env:
   # ==================== 版本 / 仓库配置 ====================
-  WORKFLOW_VERSION: "V02.r1"
+  WORKFLOW_VERSION: "V02.r1-缓存"
   PRIV_REPO: "leonhsuxu/VPSscript"       # 私库（代码+数据+凭据+产物）
   PRIV_BRANCH: "master"                  # 私库默认分支（若为 main 请改这里）
   GIST_USER: "leonhsuxu"                 # Gist 账号（定时运行时 github.actor 不可靠，故写死）
@@ -345,13 +345,33 @@ jobs:
           sudo apt-get install -y wireguard-tools curl resolvconf wget
           mkdir -p "$RUNNER_TEMP/apt-archives"
           sudo cp -f /var/cache/apt/archives/*.deb "$RUNNER_TEMP/apt-archives/" 2>/dev/null || true
+      - name: 缓存 Python 依赖（pylibs）
+        id: cache-pylibs
+        uses: actions/cache@v6
+        with:
+          path: pylibs
+          # 依赖未锁版本，用静态键；如需刷新依赖把末尾 -v1 改成 -v2（与 scrape 任务同法）
+          key: pylibs-${{ runner.os }}-v1
+          restore-keys: |
+            pylibs-${{ runner.os }}-
       - name: 安装 Python 依赖到 pylibs（--target，便于跨 runner 移植）
+        if: steps.cache-pylibs.outputs.cache-hit != 'true' || inputs.force_download == 'true'
         run: |
           python3 -m pip --version || sudo apt-get install -y python3-pip
           python3 -m pip install --upgrade pip
           # 自包含安装依赖到 pylibs（--target，便于跨 runner 移植；不再依赖缺失的 requirements.txt）
           python3 -m pip install --target=pylibs telethon PyYAML requests urllib3 geoip2
+          # 写版本指纹，便于将来升级依赖时识别缓存是否过期
+          pip freeze --path pylibs 2>/dev/null | sort > pylibs/VERSIONS.txt || true
+      - name: 缓存 Mihomo 二进制
+        id: cache-mihomo
+        uses: actions/cache@v6
+        with:
+          path: mihomo
+          key: mihomo-linux-amd64-${{ env.MIHOMO_VERSION }}
+          restore-keys: mihomo-linux-amd64-${{ env.MIHOMO_VERSION }}
       - name: 下载 Mihomo
+        if: steps.cache-mihomo.outputs.cache-hit != 'true' || inputs.force_download == 'true'
         run: |
           set -e
           TAG=${{ env.MIHOMO_VERSION }}
@@ -359,13 +379,29 @@ jobs:
           if ! curl --head --fail "$URL"; then echo "❌ Mihomo 下载地址不可用"; exit 1; fi
           wget --tries=3 --timeout=30 -O mihomo.gz "$URL"
           gunzip -f mihomo.gz && chmod +x mihomo && ./mihomo -v
+      - name: 缓存 wgcf 二进制（与 scrape 任务共享同一缓存键）
+        id: cache-wgcf-setup
+        uses: actions/cache@v6
+        with:
+          path: wgcf
+          key: wgcf-linux-amd64-${{ env.WGCF_VERSION }}
+          restore-keys: wgcf-linux-amd64-${{ env.WGCF_VERSION }}
       - name: 下载 wgcf
+        if: steps.cache-wgcf-setup.outputs.cache-hit != 'true' || inputs.force_download == 'true'
         run: |
           WGCF_FULL_VERSION="${{ env.WGCF_VERSION }}"
           WGCF_FILENAME_VERSION="${WGCF_FULL_VERSION#v}"
           curl -fsSL -o wgcf "https://github.com/ViRb3/wgcf/releases/download/${WGCF_FULL_VERSION}/wgcf_${WGCF_FILENAME_VERSION}_linux_amd64"
           chmod +x wgcf
+      - name: 缓存 xcspeedtest 二进制
+        id: cache-xcspeedtest
+        uses: actions/cache@v6
+        with:
+          path: xcspeedtest
+          key: xcspeedtest-linux-amd64-${{ env.SPEEDTEST_VERSION }}
+          restore-keys: xcspeedtest-linux-amd64-${{ env.SPEEDTEST_VERSION }}
       - name: 下载 xcspeedtest (speedtest-clash)
+        if: steps.cache-xcspeedtest.outputs.cache-hit != 'true' || inputs.force_download == 'true'
         run: |
           set -e
           RELEASE_TAG=${{ env.SPEEDTEST_VERSION }}
@@ -383,7 +419,15 @@ jobs:
             mv downloaded_file xcspeedtest
           fi
           chmod +x xcspeedtest && ./xcspeedtest --help
+      - name: 缓存 clash-speedtest 核心
+        id: cache-clash
+        uses: actions/cache@v6
+        with:
+          path: clash_core
+          key: clash-speedtest-linux-amd64-${{ env.CLASH_SPEEDTEST_VERSION }}
+          restore-keys: clash-speedtest-linux-amd64-${{ env.CLASH_SPEEDTEST_VERSION }}
       - name: 下载 clash-speedtest 核心
+        if: steps.cache-clash.outputs.cache-hit != 'true' || inputs.force_download == 'true'
         run: |
           set -e
           mkdir -p clash_core
