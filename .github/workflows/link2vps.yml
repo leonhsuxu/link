@@ -798,9 +798,14 @@ jobs:
           PAYLOAD_FILE=$(mktemp)
           echo '{"files": {}}' > "$PAYLOAD_FILE"
 
-          FILE_LIST=$(find _priv/flclashyaml -type f \( -name "*.yaml" -o -name "*.yml" \) \
-                      ! -name "node_ipconfig.yaml" \
-                      ! -name "node_ipconfig_rename.yaml")
+          # 白名单：只同步正式订阅文件（+TCP 中间交付），剔除 output_yaml_*/重复/调试文件（避免 Gist 体积超限 502）
+          FILE_LIST=$(cd _priv/flclashyaml && ls -1 \
+            TelePuliclink-Node.yaml \
+            TelePuliclink-10MB.yaml \
+            TelePuliclink-20MB.yaml \
+            TelePuliclink-Check.yaml \
+            TCP.yaml 2>/dev/null | sed 's#^#_priv/flclashyaml/#')
+          # 若还要把 clash.yaml / speedtest.yaml 也进 Gist，把上面两行加进 ls 列表即可
 
           if [ -z "$FILE_LIST" ]; then
             echo "⚠️ 没有符合条件的 YAML 文件需要上传。"
@@ -817,30 +822,34 @@ jobs:
           done <<< "$FILE_LIST"
 
           echo "🚀 正在上传到 Gist..."
-          MAX_RETRIES=2
+          MAX_RETRIES=4
           ATTEMPT=0
           SUCCESS=0
-          while [ $ATTEMPT -le $MAX_RETRIES ]; do
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "👉 第 $ATTEMPT 次尝试..."
-            http_code=$(curl -s -o response.json -w "%{http_code}" -X PATCH \
+            # set +e：curl 自身失败（如 HTTP/2 断流 exit 92）不能直接让 step 退出，要能重试
+            set +e
+            http_code=$(curl -sS --retry 3 --retry-delay 5 --max-time 180 \
+              -o response.json -w "%{http_code}" -X PATCH \
               -H "Authorization: token $GIST_TOKEN" \
               -H "Content-Type: application/json" \
               -d @"$PAYLOAD_FILE" \
               "https://api.github.com/gists/$GIST_ID")
+            curl_rc=$?
+            set -e
             if [ "$http_code" = "200" ]; then
               SUCCESS=1
               break
             fi
-            if [[ "$http_code" =~ ^(500|502|503|504)$ ]]; then
-              if [ $ATTEMPT -le $MAX_RETRIES ]; then
-                sleep_sec=$((ATTEMPT * 3))
-                echo "⚠️ Gist 暂时不可用 ($http_code)，${sleep_sec}s 后重试..."
-                sleep $sleep_sec
-              fi
+            echo "⚠️ 上传返回 http_code=$http_code (curl_rc=$curl_rc)"
+            if [ "$curl_rc" -ne 0 ] || [[ "$http_code" =~ ^(500|502|503|504)$ ]]; then
+              sleep_sec=$((ATTEMPT * 5))
+              echo "   Gist 暂不可用/网络抖动，${sleep_sec}s 后重试..."
+              sleep $sleep_sec
             else
               echo "❌ 错误：Gist 返回 HTTP $http_code"
-              cat response.json
+              [ -f response.json ] && cat response.json
               rm -f response.json "$PAYLOAD_FILE"
               exit 1
             fi
