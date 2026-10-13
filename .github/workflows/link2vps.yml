@@ -1,5 +1,5 @@
 # ============================================================================
-# 版本：V02.r1（公库运行私库版）
+# 版本：V02.r2（公库运行私库版）
 #
 # 架构：
 #   - 本 yml 唯一存放于公库 leonhsuxu/link/.github/workflows/
@@ -94,7 +94,7 @@ concurrency:
 # ==================== 环境变量配置 ====================
 env:
   # ==================== 版本 / 仓库配置 ====================
-  WORKFLOW_VERSION: "V02.r1"
+  WORKFLOW_VERSION: "V02.r2"
   PRIV_REPO: "leonhsuxu/VPSscript"       # 私库（代码+数据+凭据+产物）
   PRIV_BRANCH: "master"                  # 私库默认分支（若为 main 请改这里）
   GIST_USER: "leonhsuxu"                 # Gist 账号（定时运行时 github.actor 不可靠，故写死）
@@ -365,6 +365,35 @@ jobs:
           WGCF_FILENAME_VERSION="${WGCF_FULL_VERSION#v}"
           curl -fsSL -o wgcf "https://github.com/ViRb3/wgcf/releases/download/${WGCF_FULL_VERSION}/wgcf_${WGCF_FILENAME_VERSION}_linux_amd64"
           chmod +x wgcf
+      - name: 预生成 wgcf 账户（每分片一份，供各分片复用）
+        run: |
+          # 目的：避免 20 个分片各自 `wgcf register` 造成并发注册撞 Cloudflare 429；
+          # 且每分片一份「独立账户」（而非共用同一账户），避免同账户多端同时握手时 endpoint 漫游抖动。
+          set +e
+          N="${{ env.SHARD_TOTAL }}"
+          N=$((N + 0)); [ "$N" -lt 1 ] && N=1
+          OK=0
+          for i in $(seq 0 $((N - 1))); do
+            GOT=0
+            for try in 1 2 3; do
+              # wgcf 若已存在账户文件会复用，必须每轮清掉才能得到「独立」账户
+              rm -f wgcf-account.toml wgcf-profile.conf wgcf-profile.ini
+              if ./wgcf register --accept-tos >/dev/null 2>&1 && ./wgcf generate >/dev/null 2>&1 && [ -f wgcf-account.toml ]; then
+                GOT=1; break
+              fi
+              sleep $((try * 3))
+            done
+            if [ "$GOT" = "1" ]; then
+              mv wgcf-account.toml "wgcf-account.${i}.toml"
+              [ -f wgcf-profile.conf ] && mv wgcf-profile.conf "wgcf-profile.${i}.conf"
+              OK=$((OK + 1))
+              echo "✅ 账户 ${i} 生成"
+            else
+              echo "⚠️ 账户 ${i} 生成失败（多次限流 429，该分片将自行 register）"
+            fi
+            sleep 2
+          done
+          echo "🧾 预生成账户：${OK}/${N}（失败的分片将各自回退 register）"
       - name: 下载 xcspeedtest (speedtest-clash)
         run: |
           set -e
@@ -407,7 +436,12 @@ jobs:
           ls -la clash_core/
       - name: 打包工具链
         run: |
-          tar -czf toolchain.tar.gz pylibs mihomo wgcf xcspeedtest clash_core
+          LIST="pylibs mihomo wgcf xcspeedtest clash_core"
+          for f in wgcf-account.*.toml wgcf-profile.*.conf; do
+            [ -f "$f" ] && LIST="$LIST $f"
+          done
+          rm -f toolchain.tar.gz
+          tar -czf toolchain.tar.gz $LIST
           ls -lh toolchain.tar.gz
       - name: 上传工具链 artifact
         uses: actions/upload-artifact@v7
@@ -534,6 +568,15 @@ jobs:
             rm -f "_priv/clash_core"
             ln -s "$GITHUB_WORKSPACE/clash_core" "_priv/clash_core"
             echo "🔗 _priv/clash_core -> $(readlink -f "_priv/clash_core")"
+          fi
+
+          # 复用分片专属 wgcf 账户（setup 预生成）：避免本分片再自行 register 撞 429
+          ACCT="$GITHUB_WORKSPACE/wgcf-account.${{ matrix.shard }}.toml"
+          if [ -f "$ACCT" ]; then
+            cp -f "$ACCT" "_priv/wgcf-account.toml"
+            echo "🔗 复用缓存 wgcf 账户: wgcf-account.${{ matrix.shard }}.toml"
+          else
+            echo "ℹ️ 无分片专属 wgcf 账户（本分片将自行 register）"
           fi
 
           echo "--- 校验关键软链（仅展示，不因此失败）---"
