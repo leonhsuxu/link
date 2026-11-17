@@ -800,6 +800,7 @@ jobs:
           VAR_GIST_ID: ${{ vars.GIST_ID }}   # 兜底：也可在公库 Variables 里配 GIST_ID
         run: |
           echo "=== 开始筛选并同步 YAML 文件到 Gist ==="
+          echo "🔖 GIST_SYNC_VERSION=v2-batched-20261117（逐文件 PATCH，5 次重试，5s 退避）"
           # GIST_TOKEN / GIST_ID 均来自私库 .secrets.env（公库无需单独配置 secret）
           set -a; . _priv/TelegramNode/.secrets.env; set +a
           if [ -n "$GIST_TOKEN" ]; then echo "::add-mask::$GIST_TOKEN"; fi
@@ -813,7 +814,8 @@ jobs:
           fi
           USER_NAME="${GIST_USER}"
 
-          FILE_LIST=$(find _priv/flclashyaml/output_yaml -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.txt" \) \
+          # 仅同步 YAML；filtered_Min.txt（Gist 发布名 urltxt_filtered_Min.txt）不再上传
+          FILE_LIST=$(find _priv/flclashyaml/output_yaml -type f \( -name "*.yaml" -o -name "*.yml" \) \
                       ! -name "node_ipconfig.yaml" \
                       ! -name "node_ipconfig_rename.yaml")
 
