@@ -280,7 +280,7 @@ jobs:
             fi
           fi
           # SCRAPE_ONLY=true：抓取+解析+清洗+全局命名后仅导出 nodes_cache/all_nodes.json 即返回
-          SCRAPE_ONLY=true python TelegramNode/All-in-one_ClashNode.Y26.B1.r1.py
+          SCRAPE_ONLY=true python TelegramNode/All-in-one_Node.py
           EXIT_CODE=$?
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ 抓取阶段失败，退出码: $EXIT_CODE"
@@ -591,7 +591,7 @@ jobs:
           # 工具链：pylibs 与二进制在工作区根，通过 PYTHONPATH/PATH + 软链提供
           export PYTHONPATH="$GITHUB_WORKSPACE/pylibs"
           export PATH="$GITHUB_WORKSPACE/pylibs/bin:$GITHUB_WORKSPACE:$PATH"
-          python3 TelegramNode/All-in-one_ClashNode.Y26.B1.r1.py
+          python3 TelegramNode/All-in-one_Node.py
           EXIT_CODE=$?
           if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ 节点测速完成（分片 ${{ matrix.shard }}）"
@@ -747,7 +747,7 @@ jobs:
         run: |
           echo "📥 已下载分片目录："
           ls -d shard-* 2>/dev/null || echo "（无分片产物）"
-          python TelegramNode/All-in-one_ClashNode.Y26.B1.r1.py
+          python TelegramNode/All-in-one_Node.py
 
       # === 步骤6：清理分片临时目录（避免误提交） ===
       - name: 清理分片临时目录
@@ -803,15 +803,15 @@ jobs:
           # GIST_TOKEN / GIST_ID 均来自私库 .secrets.env（公库无需单独配置 secret）
           set -a; . _priv/TelegramNode/.secrets.env; set +a
           if [ -n "$GIST_TOKEN" ]; then echo "::add-mask::$GIST_TOKEN"; fi
-          GIST_ID="${GIST_ID:-$VAR_GIST_ID}"
+          # —— 防御：剥掉 Windows CRLF(\r)/换行/首尾空格，避免 Token 被 \r 污染导致 401 ——
+          GIST_TOKEN="$(printf '%s' "$GIST_TOKEN" | tr -d '\r\n ')"
+          echo "ℹ️ GIST_TOKEN 长度(去 \\r/\\n/空格后): ${#GIST_TOKEN}"
+          GIST_ID="$(printf '%s' "${GIST_ID:-$VAR_GIST_ID}" | tr -d '\r\n ')"
           if [ -z "$GIST_TOKEN" ] || [ -z "$GIST_ID" ]; then
             echo "⚠️ 未配置 GIST_TOKEN 或 GIST_ID（.secrets.env / 公库 Variables 均未提供），跳过同步。"
             exit 0
           fi
           USER_NAME="${GIST_USER}"
-
-          PAYLOAD_FILE=$(mktemp)
-          echo '{"files": {}}' > "$PAYLOAD_FILE"
 
           FILE_LIST=$(find _priv/flclashyaml/output_yaml -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.txt" \) \
                       ! -name "node_ipconfig.yaml" \
@@ -822,60 +822,73 @@ jobs:
             exit 0
           fi
 
+          echo "🚀 开始逐个上传文件到 Gist（分批避免单次 payload 过大触发 502）..."
+          MAX_RETRIES=5
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+
           while IFS= read -r filepath; do
             # 固定链接方案发布名加前缀，避免与 TG-Link(裸名 TCP/clash/speedtest.yaml) 及方案一(裸名 filtered_Min.yaml) 在同一 Gist 撞名互覆
             raw_filename="urltxt_${filepath#_priv/flclashyaml/output_yaml/}"
             filename=$(echo "$raw_filename" | sed 's/\//_/g')
             filesize=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null || echo 0)
-            echo "正在处理: $filename ($filesize bytes)"
-            jq --arg name "$filename" --rawfile content "$filepath" \
-               '.files[$name] = {content: $content}' "$PAYLOAD_FILE" > tmp.json && mv tmp.json "$PAYLOAD_FILE"
+            echo "📤 正在上传: $filename ($filesize bytes)"
+
+            # 每个文件单独构造 payload，控制单次请求体大小（关键：18MB 合并请求会 502）
+            BATCH_PAYLOAD=$(mktemp)
+            jq -n --arg name "$filename" --rawfile content "$filepath" \
+               '{files: {($name): {content: $content}}}' > "$BATCH_PAYLOAD"
+
+            uploaded=0
+            ATTEMPT=0
+            while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+              ATTEMPT=$((ATTEMPT + 1))
+              http_code=$(curl -s -o response.json -w "%{http_code}" -X PATCH \
+                -H "Authorization: token $GIST_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d @"$BATCH_PAYLOAD" \
+                "https://api.github.com/gists/$GIST_ID")
+              if [ "$http_code" = "200" ]; then
+                uploaded=1
+                break
+              fi
+              if [[ "$http_code" =~ ^(429|500|502|503|504)$ ]]; then
+                sleep_sec=$((ATTEMPT * 5))
+                echo "   ⚠️ 上传失败 ($http_code)，${sleep_sec}s 后重试 ($ATTEMPT/$MAX_RETRIES)..."
+                sleep "$sleep_sec"
+              else
+                echo "   ❌ 上传失败 HTTP $http_code"
+                cat response.json
+                break
+              fi
+            done
+            rm -f "$BATCH_PAYLOAD"
+
+            if [ "$uploaded" -eq 1 ]; then
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              echo "   ✅ 上传成功: $filename"
+            else
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              echo "   ❌ 上传失败: $filename"
+            fi
           done <<< "$FILE_LIST"
 
-          echo "🚀 正在上传到 Gist..."
-          MAX_RETRIES=2
-          ATTEMPT=0
-          SUCCESS=0
-          while [ $ATTEMPT -le $MAX_RETRIES ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "👉 第 $ATTEMPT 次尝试..."
-            http_code=$(curl -s -o response.json -w "%{http_code}" -X PATCH \
-              -H "Authorization: token $GIST_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d @"$PAYLOAD_FILE" \
-              "https://api.github.com/gists/$GIST_ID")
-            if [ "$http_code" = "200" ]; then
-              SUCCESS=1
-              break
-            fi
-            if [[ "$http_code" =~ ^(500|502|503|504)$ ]]; then
-              if [ $ATTEMPT -le $MAX_RETRIES ]; then
-                sleep_sec=$((ATTEMPT * 3))
-                echo "⚠️ Gist 暂时不可用 ($http_code)，${sleep_sec}s 后重试..."
-                sleep $sleep_sec
-              fi
-            else
-              echo "❌ 错误：Gist 返回 HTTP $http_code"
-              cat response.json
-              rm -f response.json "$PAYLOAD_FILE"
-              exit 1
-            fi
-          done
-          if [ $SUCCESS -eq 1 ]; then
-            echo "✅ 指定文件同步成功！"
-            echo "🔗 订阅链接 (Raw URL)：与原先完全一致"
-            while IFS= read -r filepath; do
-              # 固定链接方案发布名加前缀，避免与 TG-Link/方案一 在同一 Gist 撞名互覆
-              raw_filename="urltxt_${filepath#_priv/flclashyaml/output_yaml/}"
-              filename=$(echo "$raw_filename" | sed 's/\//_/g')
-              url_filename=$(echo "$filename" | sed 's/ /%20/g')
-              echo "📄 $raw_filename -> https://gist.githubusercontent.com/$USER_NAME/$GIST_ID/raw/$url_filename"
-            done <<< "$FILE_LIST"
-          else
-            echo "❌ 同步失败，已达到最大重试次数。"
+          echo "📊 Gist 同步结果: 成功 $SUCCESS_COUNT / 失败 $FAIL_COUNT"
+          if [ "$FAIL_COUNT" -gt 0 ]; then
+            echo "❌ 部分文件上传失败，同步未完全成功。"
             exit 1
           fi
-          rm -f response.json "$PAYLOAD_FILE"
+
+          echo "✅ 指定文件同步成功！"
+          echo "🔗 订阅链接 (Raw URL)：与原先完全一致"
+          while IFS= read -r filepath; do
+            raw_filename="urltxt_${filepath#_priv/flclashyaml/output_yaml/}"
+            filename=$(echo "$raw_filename" | sed 's/\//_/g')
+            url_filename=$(echo "$filename" | sed 's/ /%20/g')
+            echo "📄 $raw_filename -> https://gist.githubusercontent.com/$USER_NAME/$GIST_ID/raw/$url_filename"
+          done <<< "$FILE_LIST"
+          rm -f response.json
+
 
       # === 步骤9：清理本次运行全部 artifact（最后一个消费者 merge 跑完后删除，防公网下载）===
       #   覆盖节点缓存(nodes-cache)、工具链(toolchain)、各分片(shard-*) 全部 artifact。
